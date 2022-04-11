@@ -16,15 +16,16 @@ sudo chmod a+w $SOCK
 curl -s --unix-socket $SOCK http://localhost/peers
 ```
 
-get a client config:
-```sh
-KEY=$(wg genkey)
-PUBKEY=$(echo $KEY | wg pubkey)
-curl -s --unix-socket $SOCK http://localhost/peer -X PUT --data "{\"PublicKey\": \"${PUBKEY}\"}" | jq . > wg.conf
-cat wg.conf | sed "s/<PRIVATE KEY>/$KEY/g" | tee wg.conf
-```
-
 if no PublicKey is specifed one will be generated:
 ```sh
 curl -s --unix-socket $SOCK http://localhost/peer -X PUT --data "{}"
 ```
+
+or specify PublicKey:
+```sh
+KEY=$(wg genkey)
+PUBKEY=$(echo $KEY | wg pubkey)
+curl -s --unix-socket $SOCK http://localhost/peer -X PUT --data "{\"PublicKey\": \"${PUBKEY}\"}"
+```
+
+use the ui for .conf and qrcode
