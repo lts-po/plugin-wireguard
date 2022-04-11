@@ -116,7 +116,7 @@ func getPeers() ([]ClientPeer, error) {
 	return peers, nil
 }
 
-// TODO return a new client ip that is not used
+// return a new client ip that is not used
 func getNewPeerAddress() (string, error) {
 	peers, err := getPeers()
 	if err != nil {
@@ -130,7 +130,7 @@ func getNewPeerAddress() (string, error) {
 	}
 
 	address := ""
-	for i := 3; i < 255; i++ {
+	for i := 2; i < 255; i++ {
 		ip := fmt.Sprintf("192.168.3.%d/32", i)
 		_, exists := ips[ip]
 		if !exists {
@@ -266,8 +266,27 @@ func pluginPeer(w http.ResponseWriter, r *http.Request) {
 
 		config.Interface.Address = address
 	} else {
-		// TODO we need to verify
-		/*} else { config.Interface.Address = peer.Address*/
+		//TODO support /24 etc for supplied address
+		address := strings.Replace(peer.AllowedIPs, "/32", "", 1)
+		ok := true
+
+		peers, _ := getPeers()
+
+		for _, p := range peers {
+			ip := strings.Replace(p.AllowedIPs, "/32", "", 1)
+			if ip == address {
+				ok = false
+				break
+			}
+		}
+
+		if !ok {
+			fmt.Println("error: address already set")
+			http.Error(w, "address already set", 400)
+			return
+		}
+
+		config.Interface.Address = peer.AllowedIPs
 	}
 
 	// TODO verify pubkey
