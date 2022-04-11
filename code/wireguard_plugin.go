@@ -53,7 +53,6 @@ func genKeyPair() (KeyPair, error) {
 
 	cmd := exec.Command("wg", "genkey")
 	stdout, err := cmd.Output()
-
 	if err != nil {
 		fmt.Println("wg genkey failed", err)
 		return keypair, err
@@ -168,7 +167,6 @@ func getEndpoint() (string, error) {
 
 	port, ok := os.LookupEnv("WIREGUARD_PORT")
 	if !ok {
-		//return "", errors.New("WIREGUARD_PORT not set")
 		port = "51280"
 	}
 
@@ -178,10 +176,17 @@ func getEndpoint() (string, error) {
 
 // get wireguard endpoint from the environment
 func getPublicKey() (string, error) {
-	pubkey, ok := os.LookupEnv("WIREGUARD_PUBKEY")
+	/*pubkey, ok := os.LookupEnv("WIREGUARD_PUBKEY")
 	if !ok {
 		return "", errors.New("WIREGUARD_PUBKEY not set")
+	}*/
+	cmd := exec.Command("wg", "show", "wg0", "public-key")
+	stdout, err := cmd.Output()
+	if err != nil {
+		return "", err
 	}
+
+	pubkey := strings.TrimSuffix(string(stdout), "\n")
 
 	return pubkey, nil
 }
@@ -342,6 +347,20 @@ func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(string(data))
 }
 
+// TODO parse output from wg show wg0 dump && strip PrivateKey
+func pluginGetStatus(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("/scripts/wg-json")
+	data, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg-json failed", err)
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprint(w, string(data))
+}
+
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
@@ -353,7 +372,8 @@ func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/genkey", pluginGenKey).Methods("GET")
-	//unix_plugin_router.HandleFunc("/config", pluginGetConfig).Methods("GET")
+	unix_plugin_router.HandleFunc("/config", pluginGetConfig).Methods("GET")
+	unix_plugin_router.HandleFunc("/status", pluginGetStatus).Methods("GET")
 	unix_plugin_router.HandleFunc("/peers", pluginGetPeers).Methods("GET")
 	unix_plugin_router.HandleFunc("/peer", pluginPeer).Methods("PUT", "DELETE")
 
