@@ -246,6 +246,7 @@ func pluginPeer(w http.ResponseWriter, r *http.Request) {
 		}
 
 		config.Interface.PrivateKey = keypair.PrivateKey
+		peer.PublicKey = keypair.PublicKey
 	} else {
 		config.Interface.PrivateKey = "<PRIVATE KEY>"
 	}
@@ -270,6 +271,8 @@ func pluginPeer(w http.ResponseWriter, r *http.Request) {
 	//wg set wg0 peer <client_pubkey> allowed-ips 10.0.0.x/32
 	if len(config.Interface.Address) > 0 {
 		AllowedIPs := strings.Replace(config.Interface.Address, "/24", "/32", 1)
+
+		fmt.Println("running:", "wg", "set", "wg0", "peer", peer.PublicKey, "allowed-ips", AllowedIPs)
 
 		cmd := exec.Command("wg", "set", "wg0", "peer", peer.PublicKey, "allowed-ips", AllowedIPs)
 		_, err := cmd.Output()
@@ -328,8 +331,6 @@ func pluginGetPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
-	//config := ClientConfig{}
-
 	data, err := ioutil.ReadFile(WireguardConfigFile)
 	if err != nil {
 		fmt.Println("failed to read config file:", err)
