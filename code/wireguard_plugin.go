@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -17,7 +18,11 @@ import (
 )
 
 var UNIX_PLUGIN_LISTENER = "/state/api/wireguard_plugin"
+
 //var UNIX_PLUGIN_LISTENER = "./http.sock"
+
+var TEST_PREFIX = ""
+var WireguardConfigFile = TEST_PREFIX + "/configs/wireguard/wg0.conf"
 
 type KeyPair struct {
 	PrivateKey string
@@ -79,9 +84,67 @@ func genKeyPair() (KeyPair, error) {
 	return keypair, nil
 }
 
+func getPeers() ([]ClientPeer, error) {
+	peers := []ClientPeer{}
+
+	cmd := exec.Command("wg", "show", "wg0", "allowed-ips")
+	data, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg show failed", err)
+		return peers, err
+	}
+
+	endpoint, err := getEndpoint()
+	if err != nil {
+		return peers, err
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		pieces := strings.Split(line, "\t")
+		if len(pieces) < 2 {
+			continue
+		}
+
+		peer := ClientPeer{}
+		peer.PublicKey = pieces[0]
+		peer.AllowedIPs = pieces[1]
+		peer.Endpoint = endpoint
+		peer.PersistentKeepalive = 25
+
+		peers = append(peers, peer)
+	}
+
+	return peers, nil
+}
+
 // TODO return a new client ip that is not used
-func getClientAddress() (string, error) {
-	return "192.168.3.4/24", nil
+func getNewPeerAddress() (string, error) {
+	peers, err := getPeers()
+	if err != nil {
+		return "", err
+	}
+
+	ips := map[string]bool{}
+
+	for _, entry := range peers {
+		ips[entry.AllowedIPs] = true
+	}
+
+	address := ""
+	for i := 3; i < 255; i++ {
+		ip := fmt.Sprintf("192.168.3.%d/32", i)
+		_, exists := ips[ip]
+		if !exists {
+			address = strings.Replace(ip, "/32", "/24", 1)
+			break
+		}
+	}
+
+	if len(address) == 0 {
+		return "", errors.New("could not find a new peer address")
+	}
+
+	return address, nil
 }
 
 func pluginGenKey(w http.ResponseWriter, r *http.Request) {
@@ -98,14 +161,15 @@ func pluginGenKey(w http.ResponseWriter, r *http.Request) {
 
 // get wireguard endpoint from the environment
 func getEndpoint() (string, error) {
-	network, ok := os.LookupEnv("WIREGUARD_NETWORK")
+	network, ok := os.LookupEnv("LANIP")
 	if !ok {
-		return "", errors.New("WIREGUARD_NETWORK not set")
+		return "", errors.New("LANIP not set")
 	}
 
 	port, ok := os.LookupEnv("WIREGUARD_PORT")
 	if !ok {
-		return "", errors.New("WIREGUARD_PORT not set")
+		//return "", errors.New("WIREGUARD_PORT not set")
+		port = "51280"
 	}
 
 	endpoint := fmt.Sprintf("%s:%s", network, port)
@@ -122,23 +186,108 @@ func getPublicKey() (string, error) {
 	return pubkey, nil
 }
 
+func saveConfig() error {
+	cmd := exec.Command("wg-quick", "save", WireguardConfigFile)
+	_, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func removePeer(peer ClientPeer) error {
+	cmd := exec.Command("wg", "set", "wg0", "peer", peer.PublicKey, "remove")
+	_, err := cmd.Output()
+	if err != nil {
+		return err
+	}
+
+	err = saveConfig()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // return config for a client
-func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
+func pluginPeer(w http.ResponseWriter, r *http.Request) {
+	peer := ClientPeer{}
+	err := json.NewDecoder(r.Body).Decode(&peer)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	fmt.Println("peer:", peer)
+
+	if r.Method == http.MethodDelete {
+		err = removePeer(peer)
+		if err != nil {
+			fmt.Println("DELETE peer err:", err)
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(true)
+		return
+	}
+
 	config := ClientConfig{}
 
-	keypair, err := genKeyPair()
+	if len(peer.PublicKey) == 0 {
+		keypair, err := genKeyPair()
+		if err != nil {
+			fmt.Println("wg key failed")
+			http.Error(w, "Not found", 404)
+			return
+		}
+
+		config.Interface.PrivateKey = keypair.PrivateKey
+	} else {
+		config.Interface.PrivateKey = "<PRIVATE KEY>"
+	}
+
+	if len(peer.AllowedIPs) == 0 {
+		address, err := getNewPeerAddress()
+		if err != nil {
+			fmt.Println("error:", err)
+			http.Error(w, "Not found", 404)
+			return
+		}
+
+		config.Interface.Address = address
+	} else {
+		// TODO we need to verify
+		/*} else { config.Interface.Address = peer.Address*/
+	}
+
+	// TODO verify pubkey
+
+	//add a new peer
+	//wg set wg0 peer <client_pubkey> allowed-ips 10.0.0.x/32
+	if len(config.Interface.Address) > 0 {
+		AllowedIPs := strings.Replace(config.Interface.Address, "/24", "/32", 1)
+
+		cmd := exec.Command("wg", "set", "wg0", "peer", peer.PublicKey, "allowed-ips", AllowedIPs)
+		_, err := cmd.Output()
+		if err != nil {
+			fmt.Println("wg set error:", err)
+			http.Error(w, err.Error(), 400)
+			return
+		}
+	}
+
+	err = saveConfig()
 	if err != nil {
-		fmt.Println("wg key failed")
-		http.Error(w, "Not found", 404)
+		fmt.Println("failed to save config:", err)
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
-	address, err := getClientAddress()
-	if err != nil {
-		fmt.Println("failed to get client address")
-		http.Error(w, "Not found", 404)
-		return
-	}
+	// return client config file
 
 	endpoint, err := getEndpoint()
 	if err != nil {
@@ -147,8 +296,6 @@ func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config.Interface.PrivateKey = keypair.PrivateKey
-	config.Interface.Address = address
 	config.Interface.DNS = "1.1.1.1, 1.0.0.1"
 
 	pubkey, err := getPublicKey()
@@ -167,6 +314,33 @@ func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(config)
 }
 
+// get already configured clients
+func pluginGetPeers(w http.ResponseWriter, r *http.Request) {
+	peers, err := getPeers()
+	if err != nil {
+		fmt.Println("error:", err)
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(peers)
+}
+
+func pluginGetConfig(w http.ResponseWriter, r *http.Request) {
+	//config := ClientConfig{}
+
+	data, err := ioutil.ReadFile(WireguardConfigFile)
+	if err != nil {
+		fmt.Println("failed to read config file:", err)
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(string(data))
+}
+
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
@@ -178,7 +352,9 @@ func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/genkey", pluginGenKey).Methods("GET")
-	unix_plugin_router.HandleFunc("/config", pluginGetConfig).Methods("GET")
+	//unix_plugin_router.HandleFunc("/config", pluginGetConfig).Methods("GET")
+	unix_plugin_router.HandleFunc("/peers", pluginGetPeers).Methods("GET")
+	unix_plugin_router.HandleFunc("/peer", pluginPeer).Methods("PUT", "DELETE")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
